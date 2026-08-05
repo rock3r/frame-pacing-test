@@ -53,3 +53,30 @@ lands in WindowServer.
 
 The remaining ~1 W paced cost is the SwingGraphics GPU→CPU→Swing copy per
 frame — the zero-copy problem, out of scope for FramePacing.
+
+## Measured results — Windows (2026-08-05, RTX 3080 Ti, 59 Hz display)
+
+Per-process `GPU Engine` counters via `Get-Counter`, app in the interactive
+session:
+
+| | Baseline (unpaced) | Paced (FramePacing) |
+|---|---|---|
+| renders/sec | ~100–140 | ~48–58 (tick period 16.95 ms) |
+| Process CPU (one core) | ~89% | ~63% |
+| Process GPU | ~8–19% | ~8–17% |
+
+The D3D present path already half-bounds the unpaced loop (~2× refresh vs
+~10× on macOS), and an idle 3080 Ti doesn't stress on this scene — Windows
+shows the cadence lock and CPU win rather than a GPU collapse.
+
+## Measured results — Linux (2026-08-05, Ubuntu 26.04 VM, Xvfb)
+
+Functional validation only (software rendering; GPU numbers meaningless in a
+VM): service registers, `refreshPeriodNanos` correctly unknown under Xvfb,
+60 Hz fallback engages, coalescing degrades gracefully when render is slower
+than the tick (at most one repaint per tick).
+
+| | Baseline (unpaced) | Paced (FramePacing) |
+|---|---|---|
+| renders/sec | ~46–81 | ~29–33 |
+| Process CPU (one core) | ~89% | ~74% |
