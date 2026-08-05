@@ -11,7 +11,7 @@ kotlin {
 
 dependencies {
     implementation(compose.desktop.currentOs)
-    implementation(files("/Users/rock3r/src/jbr-api/out/jbr-api-SNAPSHOT.jar"))
+    implementation(files("libs/jbr-api-SNAPSHOT.jar"))
 }
 
 application {
