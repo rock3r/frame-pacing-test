@@ -31,6 +31,27 @@ FRAME_PACING_TEST_OPTS='-Dpacing=on' \
 The app prints `renders/sec` (scene draw executions) once per second, and the
 pacer prints the resolved quality/display/refresh period at startup.
 
+### Skiko-direct mode
+
+`SkikoDirectMain.kt` drives a `SkiaSwingLayer` directly (no Compose) to validate the
+pacing that lives *inside* skiko (the `~/src/skiko-frame-pacing` worktree — see its
+REVIEW.md), gated by `skiko.swing.frame.pacing`:
+
+```bash
+# once, in ~/src/skiko-frame-pacing: ./gradlew :skiko:publishToMavenLocal
+./gradlew runSkikoDirect -Ppacing=false   # unpaced baseline, renders/sec ≫ refresh
+./gradlew runSkikoDirect -Ppacing=true    # locks to the display refresh
+```
+
+The mavenLocal skiko `0.0.0-SNAPSHOT` jars are prepended on the runtime classpath
+(the `runLocalCmp` pattern); `needRender()` is called reflectively because the module
+compiles against the released skiko that CMP pins.
+
+Measured 2026-08-06 (same machine/display as below): unpaced ~500–570 renders/sec,
+GPU ~1.4–1.5 W; paced locks to 119–121 renders/sec, GPU ~1.05–1.27 W. The arc scene
+is far cheaper than the ComposePanel one, so the GPU stays at min clock even
+unpaced — the cadence lock is the result to look at here.
+
 ## Measured results (2026-08-05, MacBookPro18,2, 120 Hz ProMotion)
 
 `sudo powermetrics --samplers gpu_power`, Claude/other GUI noise minimized:
