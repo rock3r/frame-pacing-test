@@ -45,7 +45,10 @@ fun main() {
         val panel = ComposePanel(renderSettings = RenderSettings.SwingGraphics())
         panel.setContent { SpinnerScene() }
         frame.contentPane.add(panel)
-        frame.setSize(1600, 1000)
+        // Render area decides whether the unpaced loop can outrun the display, so make it
+        // the sweep variable: -Dwindow=WxH (default 1600x1000, the original size).
+        val winSpec = System.getProperty("window", "1600x1000").split("x")
+        frame.setSize(winSpec[0].trim().toInt(), winSpec[1].trim().toInt())
         frame.defaultCloseOperation = WindowConstants.EXIT_ON_CLOSE
         frame.isVisible = true
         if (paced) {

@@ -1,0 +1,58 @@
+#!/bin/bash
+# jbr-measure <label> <seconds>
+# Samples GPU + CPU power/clock over an interval. Works on Intel iGPU (RAPL + i915
+# sysfs) and on NVIDIA discrete (nvidia-smi), so output stays comparable across boxes.
+L="${1:-sample}"; SECS="${2:-15}"
+R=/sys/class/powercap
+rd() { sudo -n cat "$1" 2>/dev/null || echo 0; }
+
+# --- pick GPU backend -------------------------------------------------------
+GPU=none
+if command -v nvidia-smi >/dev/null 2>&1 && nvidia-smi -L 2>/dev/null | grep -q '^GPU'; then
+  GPU=nvidia
+else
+  for c in /sys/class/drm/card*/; do
+    [ -e "$c/gt_cur_freq_mhz" ] && { GPU=i915; CARD="${c%/}"; break; }
+  done
+fi
+
+# --- RAPL present? (Intel; absent on many AMD parts) ------------------------
+HAVE_RAPL=0; [ -e $R/intel-rapl:0/energy_uj ] && HAVE_RAPL=1
+
+t0=$(date +%s%N)
+[ $HAVE_RAPL = 1 ] && { e0=$(rd $R/intel-rapl:0/energy_uj); c0=$(rd $R/intel-rapl:0:0/energy_uj)
+                        u0=$(rd $R/intel-rapl:0:1/energy_uj); p0=$(rd $R/intel-rapl:1/energy_uj); }
+[ "$GPU" = i915 ] && r0=$(cat $CARD/power/rc6_residency_ms 2>/dev/null || echo 0)
+
+gsum=0; gn=0; wsum=0; usum=0
+end=$(( $(date +%s) + SECS ))
+while [ "$(date +%s)" -lt "$end" ]; do
+  case "$GPU" in
+    nvidia) read -r w cl ut <<<"$(nvidia-smi --query-gpu=power.draw,clocks.gr,utilization.gpu \
+              --format=csv,noheader,nounits 2>/dev/null | head -1 | tr -d ',')"
+            wsum=$(awk -v a="$wsum" -v b="${w:-0}" 'BEGIN{print a+b}')
+            gsum=$(awk -v a="$gsum" -v b="${cl:-0}" 'BEGIN{print a+b}')
+            usum=$(awk -v a="$usum" -v b="${ut:-0}" 'BEGIN{print a+b}') ;;
+    i915)   gsum=$(( gsum + $(cat $CARD/gt_cur_freq_mhz 2>/dev/null || echo 0) )) ;;
+  esac
+  gn=$((gn+1)); sleep 0.5
+done
+t1=$(date +%s%N)
+[ $HAVE_RAPL = 1 ] && { e1=$(rd $R/intel-rapl:0/energy_uj); c1=$(rd $R/intel-rapl:0:0/energy_uj)
+                        u1=$(rd $R/intel-rapl:0:1/energy_uj); p1=$(rd $R/intel-rapl:1/energy_uj); }
+[ "$GPU" = i915 ] && r1=$(cat $CARD/power/rc6_residency_ms 2>/dev/null || echo 0)
+
+awk -v L="$L" -v gpu="$GPU" -v rapl="$HAVE_RAPL" \
+    -v t0="$t0" -v t1="$t1" -v gn="$gn" -v gsum="$gsum" -v wsum="$wsum" -v usum="$usum" \
+    -v r0="${r0:-0}" -v r1="${r1:-0}" \
+    -v e0="${e0:-0}" -v e1="${e1:-0}" -v c0="${c0:-0}" -v c1="${c1:-0}" \
+    -v u0="${u0:-0}" -v u1="${u1:-0}" -v p0="${p0:-0}" -v p1="${p1:-0}" 'BEGIN{
+  dt=(t1-t0)/1e9
+  printf "%-26s", L
+  if (gpu=="i915") printf " rc6=%5.1f%%  clk=%4.0f MHz", (r1-r0)/10/dt, (gn?gsum/gn:0)
+  else if (gpu=="nvidia") printf " GPU=%5.1f%% clk=%4.0f MHz  GPUw=%6.2f W", \
+      (gn?usum/gn:0), (gn?gsum/gn:0), (gn?wsum/gn:0)
+  else printf " (no GPU backend)"
+  if (rapl==1) printf "  pkg=%5.2f W  core=%5.2f W  GT=%6.3f W  psys=%5.2f W", \
+      (e1-e0)/1e6/dt, (c1-c0)/1e6/dt, (u1-u0)/1e6/dt, (p1-p0)/1e6/dt
+  printf "\n" }'

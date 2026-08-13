@@ -1,0 +1,88 @@
+#!/bin/bash
+# jbr-experiment [seconds] [WxH]
+# Runs the FramePacing harness unpaced vs paced at a given window size.
+# Window size is the sweep variable (display mode held constant), matching the
+# Windows methodology so the two platforms are directly comparable.
+SECS="${1:-20}"
+WIN="${2:-1600x1000}"
+export XDG_RUNTIME_DIR=/run/user/1000
+export WAYLAND_DISPLAY=wayland-0
+export DISPLAY=:0
+export XAUTHORITY=$(ls -t /run/user/1000/.mutter-Xwaylandauth.* 2>/dev/null | head -1)
+
+# Must be the real image, not support/jrtfs_classes/jdk -- require a runnable java.
+JBR=""
+for d in $(find "$HOME/src/JetBrainsRuntime/build" -maxdepth 4 -type d -name jdk 2>/dev/null); do
+  [ -x "$d/bin/java" ] && JBR="$d" && break
+done
+[ -n "$JBR" ] || { echo "No JBR build found"; exit 1; }
+BIN="$HOME/src/frame-pacing-test/build/install/frame-pacing-test/bin/frame-pacing-test"
+[ -x "$BIN" ] || { echo "Harness not built"; exit 1; }
+
+CONNECTED=""
+for s in /sys/class/drm/card*-*/status; do
+  [ -e "$s" ] || continue
+  [ "$(cat "$s")" = connected ] && CONNECTED="$(basename "$(dirname "$s")")"
+done
+[ -n "$CONNECTED" ] || { echo "NO DISPLAY ATTACHED -- pacing measurements need an active CRTC"; exit 1; }
+
+# --- idle guard -------------------------------------------------------------
+# Background load corrupts the power figures (CPU contention shows up in pkg/core
+# while GT stays sane, which is confusing to spot after the fact). A quiet
+# jbr-bench idles around 0.5 W package; anything above 2 W means something else
+# is running and the numbers would be junk.
+# The FIRST measurement in a fresh ssh session reads ~4 W regardless of load:
+# it captures session startup (ssh login, bash init, first sudo doing PAM +
+# sudoers parse). Discard one sample so the guard measures the machine, not us.
+jbr-measure "warmup" 3 >/dev/null 2>&1
+PRE=$(jbr-measure "preflight" 5)
+IDLE_W=$(echo "$PRE" | grep -oE 'pkg=[[:space:]]*[0-9.]+' | grep -oE '[0-9.]+$')
+if awk -v w="${IDLE_W:-99}" 'BEGIN{exit !(w+0 > 2.0)}'; then
+  echo "ABORT: machine is not idle -- package power ${IDLE_W} W (expect <1 W when quiet)."
+  echo "  measurements would be corrupted by CPU contention. Top consumers:"
+  ps -eo pcpu,pid,args --sort=-pcpu | head -6 | cut -c1-110 | sed 's/^/    /'
+  exit 1
+fi
+echo "  idle check: ${IDLE_W} W package -- quiet, proceeding"
+
+MODE=$(sudo -n cat /sys/kernel/debug/dri/1/i915_display_info 2>/dev/null \
+       | grep -A2 'CRTC:58' | grep -oE 'mode="[0-9x]+": [0-9]+' | head -1)
+echo "=== FramePacing: unpaced vs paced ==="
+echo "  host:    $(hostname)   window: $WIN"
+echo "  output:  $CONNECTED   $MODE"
+echo
+
+run_mode() {   # $1 = on|off  $2 = label
+  local log=/tmp/fp-$1.log
+  JAVA_HOME="$JBR" FRAME_PACING_TEST_OPTS="-Dpacing=$1 -Dwindow=$WIN" "$BIN" > "$log" 2>&1 &
+  local P=$!
+  sleep 10
+  if ! kill -0 "$P" 2>/dev/null; then
+    echo "  $2: app exited early --"; head -6 "$log" | sed 's/^/      /'; return 1
+  fi
+  jbr-measure "$2 win=$WIN" "$SECS"
+  awk -F': *' '/renders\/sec/{v[++n]=$2}
+       END{s=0;c=0; for(i=4;i<=n;i++){s+=v[i];c++}
+           if(c) printf "  %-30s renders/sec avg = %.1f  (n=%d)\n","",s/c,c}' "$log"
+  kill "$P" 2>/dev/null; pkill -f MainKt 2>/dev/null; sleep 2; pkill -9 -f MainKt 2>/dev/null; sleep 6
+}
+
+run_mode off "UNPACED"
+echo
+run_mode on  "PACED  "
+echo
+# --- post-run idle check ---------------------------------------------------
+# The start-of-run guard cannot catch load that appears mid-run (e.g. a Gradle
+# daemon waking up), which silently inflates pkg/core while leaving GT looking
+# sane. Re-check afterwards and say so loudly if the run is suspect.
+POST=$(jbr-measure "postflight" 5)
+POST_W=$(echo "$POST" | grep -oE 'pkg=[[:space:]]*[0-9.]+' | grep -oE '[0-9.]+$')
+if awk -v w="${POST_W:-99}" 'BEGIN{exit !(w+0 > 2.0)}'; then
+  echo "  *** SUSPECT RUN: package power was ${POST_W} W after the run (expect <1 W)."
+  echo "  *** Something loaded the machine mid-run; power figures above are unreliable."
+  ps -eo pcpu,pid,args --sort=-pcpu | head -5 | cut -c1-110 | sed 's/^/      /'
+else
+  echo "  idle after run: ${POST_W} W -- clean, figures are trustworthy"
+fi
+echo
+grep -ihE 'framepacing' /tmp/fp-on.log | head -2 | sed 's/^/  /'
