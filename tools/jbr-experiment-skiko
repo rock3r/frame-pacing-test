@@ -1,0 +1,87 @@
+#!/bin/bash
+# jbr-experiment-skiko [seconds] [WxH]
+# Skiko-direct variant of jbr-experiment: same guards and measurement, but drives
+# SkikoDirectMainKt with the mavenLocal skiko 0.0.0-SNAPSHOT jars prepended, so the
+# pacing under test is the one inside skiko (skiko.swing.frame.pacing), not the
+# app-level RepaintManager pacer. Launches the installDist lib dir directly -- no
+# Gradle at run time, which would trip the idle guard.
+SECS="${1:-20}"
+WIN="${2:-1600x1000}"
+export XDG_RUNTIME_DIR=/run/user/1000
+export WAYLAND_DISPLAY=wayland-0
+export DISPLAY=:0
+export XAUTHORITY=$(ls -t /run/user/1000/.mutter-Xwaylandauth.* 2>/dev/null | head -1)
+
+# Must be the real image, not support/jrtfs_classes/jdk -- require a runnable java.
+JBR=""
+for d in $(find "$HOME/src/JetBrainsRuntime/build" -maxdepth 4 -type d -name jdk 2>/dev/null); do
+  [ -x "$d/bin/java" ] && JBR="$d" && break
+done
+[ -n "$JBR" ] || { echo "No JBR build found"; exit 1; }
+
+LIB="$HOME/src/frame-pacing-test/build/install/frame-pacing-test/lib"
+[ -d "$LIB" ] || { echo "Harness not built -- run ./gradlew installDist first"; exit 1; }
+
+M2="$HOME/.m2/repository/org/jetbrains/skiko"
+SNAP="$M2/skiko-awt/0.0.0-SNAPSHOT/skiko-awt-0.0.0-SNAPSHOT.jar"
+SNAP="$SNAP:$M2/skiko-awt-runtime-linux-x64/0.0.0-SNAPSHOT/skiko-awt-runtime-linux-x64-0.0.0-SNAPSHOT.jar"
+for j in ${SNAP//:/ }; do
+  [ -f "$j" ] || { echo "Missing $j -- publish skiko to mavenLocal first"; exit 1; }
+done
+
+CONNECTED=""
+for s in /sys/class/drm/card*-*/status; do
+  [ -e "$s" ] || continue
+  [ "$(cat "$s")" = connected ] && CONNECTED="$(basename "$(dirname "$s")")"
+done
+[ -n "$CONNECTED" ] || { echo "NO DISPLAY ATTACHED -- pacing measurements need an active CRTC"; exit 1; }
+
+# --- idle guard (see jbr-experiment for the rationale and the warm-up trap) --
+jbr-measure "warmup" 3 >/dev/null 2>&1
+PRE=$(jbr-measure "preflight" 5)
+IDLE_W=$(echo "$PRE" | grep -oE 'pkg=[[:space:]]*[0-9.]+' | grep -oE '[0-9.]+$')
+if awk -v w="${IDLE_W:-99}" 'BEGIN{exit !(w+0 > 2.0)}'; then
+  echo "ABORT: machine is not idle -- package power ${IDLE_W} W (expect <1 W when quiet)."
+  ps -eo pcpu,pid,args --sort=-pcpu | head -6 | cut -c1-110 | sed 's/^/    /'
+  exit 1
+fi
+echo "  idle check: ${IDLE_W} W package -- quiet, proceeding"
+
+echo "=== Skiko frame pacing (skiko.swing.frame.pacing): unpaced vs paced ==="
+echo "  host:    $(hostname)   window: $WIN"
+echo "  output:  $CONNECTED"
+echo
+
+run_mode() {   # $1 = false|true  $2 = label
+  local log=/tmp/fp-skiko-$1.log
+  "$JBR/bin/java" -cp "$SNAP:$LIB/*" \
+    -Dskiko.swing.frame.pacing="$1" -Dwindow="$WIN" SkikoDirectMainKt > "$log" 2>&1 &
+  local P=$!
+  sleep 10
+  if ! kill -0 "$P" 2>/dev/null; then
+    echo "  $2: app exited early --"; head -8 "$log" | sed 's/^/      /'; return 1
+  fi
+  jbr-measure "$2 win=$WIN" "$SECS"
+  awk -F': *' '/renders\/sec/{v[++n]=$2}
+       END{s=0;c=0; for(i=4;i<=n;i++){s+=v[i];c++}
+           if(c) printf "  %-30s renders/sec avg = %.1f  (n=%d)\n","",s/c,c}' "$log"
+  kill "$P" 2>/dev/null; pkill -f SkikoDirectMainKt 2>/dev/null; sleep 2
+  pkill -9 -f SkikoDirectMainKt 2>/dev/null; sleep 6
+}
+
+run_mode false "UNPACED"
+echo
+run_mode true  "PACED  "
+echo
+# --- post-run idle check (mid-run load makes figures junk; say so loudly) ----
+POST=$(jbr-measure "postflight" 5)
+POST_W=$(echo "$POST" | grep -oE 'pkg=[[:space:]]*[0-9.]+' | grep -oE '[0-9.]+$')
+if awk -v w="${POST_W:-99}" 'BEGIN{exit !(w+0 > 2.0)}'; then
+  echo "  *** SUSPECT RUN: package power was ${POST_W} W after the run (expect <1 W)."
+  echo "  *** Something loaded the machine mid-run; power figures above are unreliable."
+  ps -eo pcpu,pid,args --sort=-pcpu | head -5 | cut -c1-110 | sed 's/^/      /'
+else
+  echo "  idle after run: ${POST_W} W -- clean, figures are trustworthy"
+fi
+echo
+grep -E "needRender|frame\.pacing|java\.runtime" /tmp/fp-skiko-true.log | head -4 | sed 's/^/  /'

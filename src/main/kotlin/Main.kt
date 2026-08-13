@@ -20,6 +20,7 @@ import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.drawscope.rotate
 import androidx.compose.ui.unit.dp
+import java.awt.GraphicsEnvironment
 import javax.swing.JFrame
 import javax.swing.SwingUtilities
 import javax.swing.WindowConstants
@@ -49,12 +50,44 @@ fun main() {
         // the sweep variable: -Dwindow=WxH (default 1600x1000, the original size).
         val winSpec = System.getProperty("window", "1600x1000").split("x")
         frame.setSize(winSpec[0].trim().toInt(), winSpec[1].trim().toInt())
+        placeOnDisplay(frame)
         frame.defaultCloseOperation = WindowConstants.EXIT_ON_CLOSE
         frame.isVisible = true
         if (paced) {
             PacedRepaintManager.install(frame)
         }
     }
+}
+
+/**
+ * Puts the window on the screen selected by -Ddisplay=N (index into the
+ * enumeration printed below; default is whichever screen the toolkit picks).
+ *
+ * The pacer resolves its display once, from the frame's GraphicsConfiguration
+ * at install time, and never re-resolves — so a mixed-refresh setup has to be
+ * tested by *launching* on each display in turn, not by dragging the window
+ * between them.
+ */
+private fun placeOnDisplay(frame: JFrame) {
+    val env = GraphicsEnvironment.getLocalGraphicsEnvironment()
+    val screens = env.screenDevices
+    val primary = env.defaultScreenDevice
+    for ((i, device) in screens.withIndex()) {
+        val bounds = device.defaultConfiguration.bounds
+        val mode = device.displayMode
+        println(
+            "display[$i]: ${device.iDstring} ${mode.width}x${mode.height}@${mode.refreshRate}Hz " +
+                "at (${bounds.x},${bounds.y})${if (device == primary) " PRIMARY" else ""}"
+        )
+    }
+
+    val index = System.getProperty("display")?.trim()?.toIntOrNull() ?: return
+    require(index in screens.indices) { "-Ddisplay=$index but only ${screens.size} screen(s) found" }
+    val bounds = screens[index].defaultConfiguration.bounds
+    frame.setLocation(
+        bounds.x + (bounds.width - frame.width) / 2,
+        bounds.y + (bounds.height - frame.height) / 2,
+    )
 }
 
 @Composable

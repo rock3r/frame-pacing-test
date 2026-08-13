@@ -72,7 +72,9 @@ fun main() {
         JFrame("skiko-direct frame pacing validation").apply {
             defaultCloseOperation = WindowConstants.EXIT_ON_CLOSE
             contentPane.add(layer)
-            size = Dimension(800, 600)
+            // Same sweep variable as Main.kt: render area, with the display mode held fixed.
+            val winSpec = System.getProperty("window", "1600x1000").split("x")
+            size = Dimension(winSpec[0].trim().toInt(), winSpec[1].trim().toInt())
             setLocationRelativeTo(null)
             isVisible = true
         }

@@ -43,6 +43,7 @@ class PacedRepaintManager private constructor(
 
     private fun onTick(displayId: Long, timeNanos: Long) {
         // Non-EDT tick thread: return immediately, coalesce onto the EDT.
+        RenderCounter.pacingTick()
         if (flushScheduled.compareAndSet(false, true)) {
             SwingUtilities.invokeLater(::flush)
         }

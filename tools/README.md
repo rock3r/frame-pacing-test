@@ -28,6 +28,15 @@ that. Pin fractional scaling to 1 as well; GNOME at 2560×1440 was silently rend
 no-op; there is nothing to coalesce. The saving grows from there and saturates near
 −65%, because paced power floors at the cost of actually producing frames at refresh.
 
+**Mixed-refresh setups need `-Ddisplay=N`, not a mouse.** The harness prints every screen
+with its mode at startup and `-Ddisplay=N` launches the window on screen `N`. Dragging the
+window between displays proves nothing: `PacedRepaintManager` resolves its display once
+from the frame's `GraphicsConfiguration` and holds that subscription for the process
+lifetime, so the clock never re-resolves. Each display must be a separate launch. The
+number to compare is the `refreshPeriod` printed at startup (what the API *advertises* for
+that display) against `ticks/sec` (what the clock actually *delivers*) — no power
+instrumentation needed to show a disagreement.
+
 ## Traps
 
 Every one of these silently produced plausible-but-wrong numbers before it was found.
