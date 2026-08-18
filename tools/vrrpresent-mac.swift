@@ -12,7 +12,12 @@
 // delivers while this content plays.
 //
 // Build: swiftc -O vrrpresent-mac.swift -o vrrpresent-mac
-// Usage: vrrpresent-mac [targetFps] [seconds] [screenIndex]
+// Usage: vrrpresent-mac [targetFps] [seconds] [screenIndex] [timer|link]
+//   timer (default): pace presents with mach_wait_until — UNDECLARED content,
+//                    tests whether raw cadence alone drives VRR.
+//   link:            pace from this window's own CADisplayLink with
+//                    preferredFrameRateRange pinned to the target — DECLARED
+//                    content, the Apple-sanctioned way to request a rate.
 import AppKit
 import Metal
 import QuartzCore
@@ -21,6 +26,7 @@ let args = CommandLine.arguments
 let targetFps = args.count > 1 ? Double(args[1]) ?? 90.0 : 90.0
 let seconds = args.count > 2 ? Double(args[2]) ?? 15.0 : 15.0
 let screenIndex = args.count > 3 ? Int(args[3]) ?? 0 : 0
+let paceMode = args.count > 4 ? args[4] : "timer"
 
 final class PresentStats {
     private var times: [CFTimeInterval] = []
@@ -90,10 +96,13 @@ window.level = .normal
 window.isOpaque = true
 window.backgroundColor = .black
 
-guard let device = MTLCreateSystemDefaultDevice(), let queue = device.makeCommandQueue() else {
+let maybeDevice = MTLCreateSystemDefaultDevice()
+if maybeDevice == nil || maybeDevice!.makeCommandQueue() == nil {
     print("no Metal device")
     exit(1)
 }
+let device = maybeDevice!
+let queue = device.makeCommandQueue()!
 let metalLayer = CAMetalLayer()
 metalLayer.device = device
 metalLayer.pixelFormat = .bgra8Unorm
@@ -114,6 +123,37 @@ app.activate(ignoringOtherApps: true)
 
 let stats = PresentStats()
 
+var frameCounter = 0
+func renderFrame() {
+    autoreleasepool {
+        guard let drawable = metalLayer.nextDrawable(),
+              let cmd = queue.makeCommandBuffer() else { return }
+        let pass = MTLRenderPassDescriptor()
+        pass.colorAttachments[0].texture = drawable.texture
+        pass.colorAttachments[0].loadAction = .clear
+        pass.colorAttachments[0].storeAction = .store
+        let shade = (frameCounter & 1) == 0 ? 0.18 : 0.22
+        pass.colorAttachments[0].clearColor = MTLClearColor(red: shade, green: shade, blue: shade, alpha: 1)
+        if let enc = cmd.makeRenderCommandEncoder(descriptor: pass) { enc.endEncoding() }
+        drawable.addPresentedHandler { d in stats.record(d.presentedTime) }
+        cmd.present(drawable)
+        cmd.commit()
+        frameCounter += 1
+    }
+}
+
+func finish() {
+    DispatchQueue.main.async {
+        stats.report(targetPeriodMs: targetPeriodMs, gridPeriodMs: gridPeriodMs)
+        app.terminate(nil)
+    }
+}
+
+final class LinkDriver: NSObject {
+    @objc func tick(_ link: CADisplayLink) { renderFrame() }
+}
+let linkDriver = LinkDriver()
+
 var timebase = mach_timebase_info_data_t()
 mach_timebase_info(&timebase)
 func nanosToAbs(_ ns: UInt64) -> UInt64 { ns * UInt64(timebase.denom) / UInt64(timebase.numer) }
@@ -121,34 +161,27 @@ func nanosToAbs(_ ns: UInt64) -> UInt64 { ns * UInt64(timebase.denom) / UInt64(t
 let renderThread = Thread {
     // Let the window settle on its display before measuring.
     Thread.sleep(forTimeInterval: 0.5)
-    let periodAbs = nanosToAbs(UInt64(1_000_000_000.0 / targetFps))
-    var next = mach_absolute_time() + periodAbs
-    let end = mach_absolute_time() + nanosToAbs(UInt64(seconds * 1_000_000_000.0))
-    var frame = 0
-    while mach_absolute_time() < end {
-        mach_wait_until(next)
-        next += periodAbs
-        if next < mach_absolute_time() { next = mach_absolute_time() + periodAbs }
-        autoreleasepool {
-            guard let drawable = metalLayer.nextDrawable(),
-                  let cmd = queue.makeCommandBuffer() else { return }
-            let pass = MTLRenderPassDescriptor()
-            pass.colorAttachments[0].texture = drawable.texture
-            pass.colorAttachments[0].loadAction = .clear
-            pass.colorAttachments[0].storeAction = .store
-            let shade = (frame & 1) == 0 ? 0.18 : 0.22
-            pass.colorAttachments[0].clearColor = MTLClearColor(red: shade, green: shade, blue: shade, alpha: 1)
-            if let enc = cmd.makeRenderCommandEncoder(descriptor: pass) { enc.endEncoding() }
-            drawable.addPresentedHandler { d in stats.record(d.presentedTime) }
-            cmd.present(drawable)
-            cmd.commit()
-            frame += 1
+    if paceMode == "link" {
+        guard #available(macOS 14.0, *) else { print("link mode needs macOS 14+"); finish(); return }
+        let link = screen.displayLink(target: linkDriver, selector: #selector(LinkDriver.tick(_:)))
+        link.preferredFrameRateRange = CAFrameRateRange(minimum: Float(targetFps),
+                                                        maximum: Float(targetFps),
+                                                        preferred: Float(targetFps))
+        link.add(to: .current, forMode: .default)
+        RunLoop.current.run(until: Date(timeIntervalSinceNow: seconds))
+        link.invalidate()
+    } else {
+        let periodAbs = nanosToAbs(UInt64(1_000_000_000.0 / targetFps))
+        var next = mach_absolute_time() + periodAbs
+        let end = mach_absolute_time() + nanosToAbs(UInt64(seconds * 1_000_000_000.0))
+        while mach_absolute_time() < end {
+            mach_wait_until(next)
+            next += periodAbs
+            if next < mach_absolute_time() { next = mach_absolute_time() + periodAbs }
+            renderFrame()
         }
     }
-    DispatchQueue.main.async {
-        stats.report(targetPeriodMs: targetPeriodMs, gridPeriodMs: gridPeriodMs)
-        app.terminate(nil)
-    }
+    finish()
 }
 renderThread.qualityOfService = .userInteractive
 renderThread.start()

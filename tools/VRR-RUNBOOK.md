@@ -118,3 +118,30 @@ default, so on a VRR display the tick cadence is system-chosen and can differ
 between subscribers (measured: 120 in a presenting process vs ~188 in a
 window-less probe, same panel, same moment). The scenario-C experiment on
 macOS is therefore about frame-rate-range policy, not invalidation frequency.
+
+## macOS frame-rate-range experiment (2026-08-18, JBR_FRAMEPACING_RANGE knob)
+
+CFramePacing.m (spike branch) gained JBR_FRAMEPACING_RANGE=max|<fps>, pinning
+the backend link's preferredFrameRateRange. Measured on ARZOPA (Variable
+60-180) and ProMotion internal:
+- Pin 90 on the continuous-range external: ticks 90.6 Hz — honored.
+- Pin 90 on ProMotion: ticks ~120 — ProMotion supports only a discrete rate
+  set (120/80/60/48/40/30/24); requests quantize to it.
+- Pin max: ≈ nominal at idle, still floats above nominal under load
+  (180-pinned link measured up to 190 Hz mean).
+- Ground truth via vrrpresent-mac in BOTH pacing modes (timer = undeclared,
+  link = declared with pinned range): presented intervals never lock to a
+  clean sub-max grid — averages track the target, scanout wobbles
+  continuously (p50 ~10.1ms in every cell). macOS arbitrates scanout
+  privately; range declarations govern tick schedules, not observable
+  refresh. Conclusion: on macOS, "does VRR engage" is not a client-observable
+  binary; test tick cadence (JitterProbe) and presented-time distributions
+  (vrrpresent-mac), not "panel Hz".
+- TRAP that produced a false "two subscribers, two cadences on one panel"
+  reading: a Swing client that subscribes at window-show time can bind to the
+  PREVIOUS display's id — GraphicsConfiguration attribution is asynchronous
+  on macOS. Check the subscribed displayId in logs before interpreting
+  cross-process cadence differences. Real client hazard for the PRD.
+- Default-range tick outliers on the VRR external reached 23.8ms (4x the
+  nominal 5.56ms) — a "3x nominal period" stall timeout WILL occasionally
+  misfire on high-rate VRR panels; size timeouts with an absolute floor.
