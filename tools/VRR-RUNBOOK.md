@@ -99,3 +99,22 @@ quality tier, tick cadence, and whether ticks tracked content. The API
 conclusion lands in PRD §4 (VRR semantics): either "fixed-period model
 documented as max-rate nominal; ticks may be content-driven under VRR" or a
 new API surface if clients need the real per-tick deadline.
+
+## macOS ground-truth findings (2026-08-18, ARZOPA in Variable 60-180 mode)
+
+`vrrpresent-mac.swift` (this repo) is the macOS presenter: borderless Metal
+window on a chosen screen, paced by mach_wait_until, per-frame ground truth
+from MTLDrawable.addPresentedHandler. Build: `swiftc -O vrrpresent-mac.swift
+-o vrrpresent-mac`. Gotcha encoded in the source: with `screen:` supplied,
+NSWindow's contentRect is in that screen's own coordinates.
+
+Measured: presenting at a steady 90 fps on the VRR panel delivers 89.9 fps
+*average* but a broad presented-interval mixture (p50 10.1ms, 5.6-28.7ms) —
+neither clean 90Hz nor pure grid quantization. The WindowServer mediates even
+fullscreen borderless Metal, so on macOS raw present cadence does NOT drive
+panel VRR; frame-rate-range declarations do. Correspondingly, the v2
+CADisplayLink backend (CFramePacing.m) leaves preferredFrameRateRange at its
+default, so on a VRR display the tick cadence is system-chosen and can differ
+between subscribers (measured: 120 in a presenting process vs ~188 in a
+window-less probe, same panel, same moment). The scenario-C experiment on
+macOS is therefore about frame-rate-range policy, not invalidation frequency.
