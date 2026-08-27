@@ -1,0 +1,106 @@
+#!/bin/bash
+# jbr-experiment-skiko-mac [seconds] [WxH]
+# macOS counterpart to jbr-experiment-skiko. Same contract, same output shape.
+#
+# Differences that matter, not stylistic ones:
+#  - power comes from powermetrics, so GPU residency and power are separate
+#    columns and residency alone must not be read as effort (a paced run can
+#    sit at 90% residency on the minimum clock).
+#  - there is no session re-exec: on macOS the GUI session belongs to whoever
+#    is logged in, and this must be run from that account, not over ssh.
+#  - the internal panel is itself a VRR display (ProMotion 24-120), so a run
+#    on the built-in screen is never a fixed-rate control.
+SECS="${1:-20}"
+WIN="${2:-1600x1000}"
+
+# /usr/local/bin is not writable here and ~/bin is not on PATH, so resolve the
+# measurement helper next to this script instead of requiring an install step.
+HERE=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
+MEASURE="$HERE/mac-measure"
+[ -x "$MEASURE" ] || { echo "mac-measure not found beside this script ($HERE)"; exit 1; }
+
+case "$(uname)" in Darwin) ;; *) echo "macOS only -- use jbr-experiment-skiko"; exit 1 ;; esac
+if ! /usr/bin/pgrep -q WindowServer || [ -z "${HOME:-}" ]; then
+  echo "No window session. Run from the logged-in account, not over ssh."; exit 1
+fi
+
+JBR=""
+for d in $(find "$HOME/src" -maxdepth 5 -type d -path "*build/macosx-*/images/jdk" 2>/dev/null); do
+  [ -x "$d/bin/java" ] && JBR="$d" && break
+done
+[ -n "$JBR" ] || { echo "No JBR build found under ~/src"; exit 1; }
+
+LIB="$HOME/src/frame-pacing-test/build/install/frame-pacing-test/lib"
+[ -d "$LIB" ] || { echo "Harness not built -- ./gradlew installDist"; exit 1; }
+
+M2="$HOME/.m2/repository/org/jetbrains/skiko"
+SNAP="$M2/skiko-awt/0.0.0-SNAPSHOT/skiko-awt-0.0.0-SNAPSHOT.jar"
+SNAP="$SNAP:$M2/skiko-awt-runtime-macos-arm64/0.0.0-SNAPSHOT/skiko-awt-runtime-macos-arm64-0.0.0-SNAPSHOT.jar"
+for j in ${SNAP//:/ }; do
+  [ -f "$j" ] || { echo "Missing $j -- publish skiko to mavenLocal first"; exit 1; }
+done
+
+# --- idle guard (see jbr-experiment for the rationale) -----------------------
+BASELINE_FILE=/usr/local/etc/jbr-idle-baseline
+if [ -n "${JBR_IDLE_MAX:-}" ]; then
+  IDLE_MAX="$JBR_IDLE_MAX"
+elif [ -r "$BASELINE_FILE" ]; then
+  IDLE_MAX=$(awk '{printf "%.2f", $1 * 1.6 + 0.5}' "$BASELINE_FILE")
+else
+  # No Intel-shaped default here: a Mac laptop idles nowhere near a desktop and
+  # this machine is the busiest of the three. Calibrate rather than guess.
+  IDLE_MAX=""
+fi
+
+"$MEASURE" "warmup" 3 >/dev/null 2>&1
+PRE=$("$MEASURE" "preflight" 5)
+IDLE_W=$(echo "$PRE" | grep -oE 'pkg=[[:space:]]*[0-9.]+' | grep -oE '[0-9.]+$')
+if [ -z "${IDLE_W:-}" ] || awk -v w="${IDLE_W:-0}" 'BEGIN{exit !(w+0 <= 0)}'; then
+  echo "ABORT: package power read back as ${IDLE_W:-empty} W -- powermetrics unreadable."
+  exit 1
+fi
+if [ -n "$IDLE_MAX" ] && awk -v w="$IDLE_W" -v m="$IDLE_MAX" 'BEGIN{exit !(w+0 > m+0)}'; then
+  echo "ABORT: machine is not idle -- package power ${IDLE_W} W (ceiling ${IDLE_MAX} W)."
+  ps -Ao pcpu,pid,comm -r | head -6 | sed 's/^/    /'
+  exit 1
+fi
+echo "  idle check: ${IDLE_W} W package${IDLE_MAX:+ (ceiling ${IDLE_MAX} W)}"
+
+echo "=== Skiko frame pacing (skiko.swing.frame.pacing): unpaced vs paced ==="
+echo "  host:    $(hostname -s)   window: $WIN"
+system_profiler SPDisplaysDataType 2>/dev/null \
+  | grep -E "Resolution|UI Looks like|Display Type" | sed 's/^ */  /' | head -6
+echo
+
+run_mode() {   # $1 = false|true  $2 = label
+  local log="/tmp/fp-skiko-mac-$1.log"
+  "$JBR/bin/java" -cp "$SNAP:$LIB/*" \
+    -Dskiko.swing.frame.pacing="$1" -Dwindow="$WIN" SkikoDirectMainKt > "$log" 2>&1 &
+  local P=$!
+  sleep 10
+  if ! kill -0 "$P" 2>/dev/null; then
+    echo "  $2: app exited early --"; head -6 "$log" | sed 's/^/      /'; return 1
+  fi
+  "$MEASURE" "$2 win=$WIN" "$SECS"
+  awk -F': *' '/renders\/sec/{v[++n]=$2}
+       END{s=0;c=0; for(i=4;i<=n;i++){s+=v[i];c++}
+           if(c) printf "  %-30s renders/sec avg = %.1f  (n=%d)\n","",s/c,c}' "$log"
+  kill "$P" 2>/dev/null
+  # Match the java process, not the launcher: survivors steal CPU from later runs.
+  pkill -f SkikoDirectMainKt 2>/dev/null; sleep 2
+  pkill -9 -f SkikoDirectMainKt 2>/dev/null; sleep 5
+}
+
+run_mode false "UNPACED"
+echo
+run_mode true  "PACED  "
+echo
+POST=$("$MEASURE" "postflight" 5)
+POST_W=$(echo "$POST" | grep -oE 'pkg=[[:space:]]*[0-9.]+' | grep -oE '[0-9.]+$')
+if [ -n "$IDLE_MAX" ] && awk -v w="${POST_W:-99}" -v m="$IDLE_MAX" 'BEGIN{exit !(w+0 > m+0)}'; then
+  echo "  *** SUSPECT RUN: package power was ${POST_W} W after the run (ceiling ${IDLE_MAX} W)."
+else
+  echo "  idle after run: ${POST_W} W"
+fi
+echo
+grep -ihE 'skiko|framepacing|needRender' /tmp/fp-skiko-mac-true.log | head -3 | sed 's/^/  /'

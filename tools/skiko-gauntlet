@@ -1,0 +1,69 @@
+#!/bin/bash
+# skiko-gauntlet <config-label> [window-ladder...]
+# Runs one configuration of the gauntlet: evidence first, then correctness, then
+# the efficiency ladder. Refuses to record anything if the evidence is wrong,
+# because a stale jar or a scaled framebuffer produces believable numbers.
+CFG="${1:?usage: skiko-gauntlet <config-label> [WxH ...]}"; shift
+LADDER=("$@"); [ ${#LADDER[@]} -eq 0 ] && LADDER=(1600x1000 1000x650 700x450 500x320)
+
+GUI_UID=$(loginctl list-sessions --no-legend | awk '$4=="seat0"{print $2; exit}')
+GUI_USER=$(loginctl list-sessions --no-legend | awk '$4=="seat0"{print $3; exit}')
+[ -n "$GUI_UID" ] || { echo "no graphical session on seat0"; exit 1; }
+
+OUT="/tmp/gauntlet-$CFG.txt"
+: > "$OUT"
+say() { echo "$@" | tee -a "$OUT"; }
+
+run_as_gui() { sudo -H -u "$GUI_USER" sh -c "$1"; }
+
+M2="/home/$GUI_USER/.m2/repository/org/jetbrains/skiko"
+SNAP="$M2/skiko-awt/0.0.0-SNAPSHOT/skiko-awt-0.0.0-SNAPSHOT.jar:$M2/skiko-awt-runtime-linux-x64/0.0.0-SNAPSHOT/skiko-awt-runtime-linux-x64-0.0.0-SNAPSHOT.jar"
+LIB="/home/$GUI_USER/src/frame-pacing-test/build/install/frame-pacing-test/lib"
+JAVA="/home/$GUI_USER/src/JetBrainsRuntime/build/linux-x86_64-server-release/images/jdk/bin/java"
+ENVV="export XDG_RUNTIME_DIR=/run/user/$GUI_UID WAYLAND_DISPLAY=wayland-0 DISPLAY=:0; export XAUTHORITY=\$(ls -t /run/user/$GUI_UID/.mutter-Xwaylandauth.* 2>/dev/null | head -1);"
+
+say "################ CONFIG: $CFG ################"
+say "host=$(hostname)  session-owner=$GUI_USER  $(date -Is)"
+say
+say "---- evidence (traps 01,02,05,10) ----"
+run_as_gui "$ENVV $JAVA -cp '$SNAP:$LIB/*' /home/$GUI_USER/SkikoProvenance.java 2>&1 | grep -vE '^WARNING|^\$'" | tee -a "$OUT"
+
+say
+say "---- display / VRR state ----"
+for s in /sys/class/drm/card*-*/status; do
+  [ "$(cat "$s" 2>/dev/null)" = connected ] || continue
+  c=$(basename "$(dirname "$s")")
+  say "connected: $c  vrr_capable=$(cat "$(dirname "$s")/vrr_capable" 2>/dev/null || echo n/a)"
+done
+say "CRTC VRR_ENABLED (pre-run): $(sudo drm_info -j 2>/dev/null | jq -r '.["/dev/dri/card1"].crtcs[] | select(.properties.ACTIVE.value==1) | .properties.VRR_ENABLED.value' 2>/dev/null | tr '\n' ' ')"
+
+say
+say "---- phase 1: tick cadence per screen (JitterProbe) ----"
+run_as_gui "$ENVV $JAVA -cp '$SNAP:$LIB/*' /home/$GUI_USER/JitterProbe.java 600 0 2>&1 | grep -vE '^WARNING|^\$' | head -12" | tee -a "$OUT"
+
+say
+say "---- phase 2: efficiency ladder ----"
+for w in "${LADDER[@]}"; do
+  say ""
+  say ">>> window $w"
+  # VRR sampling on the active CRTC for the duration of this rung. Only the read
+  # is escalated: writing as root into a file owned by another user inside a
+  # sticky world-writable /tmp is refused even for root, by fs.protected_regular.
+  RUNG="$HOME/vrr-rung-$CFG-$w.txt"
+  : > "$RUNG"
+  ( for i in $(seq 1 45); do
+      sudo -n drm_info -j 2>/dev/null \
+        | jq -r '.["/dev/dri/card1"].crtcs[] | select(.properties.ACTIVE.value==1) | .properties.VRR_ENABLED.value' \
+        >> "$RUNG" 2>/dev/null
+      sleep 2
+    done ) &
+  SAMP=$!
+  jbr-experiment-skiko 20 "$w" 2>&1 | tee -a "$OUT"
+  kill $SAMP 2>/dev/null
+  say "    VRR_ENABLED during rung: $(sort "$RUNG" 2>/dev/null | uniq -c | tr '\n' ' ')"
+done
+
+say
+say "################ END $CFG ################"
+echo
+echo "saved to $OUT"
