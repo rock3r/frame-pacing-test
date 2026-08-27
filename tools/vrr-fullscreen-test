@@ -1,0 +1,66 @@
+#!/bin/bash
+# vrr-fullscreen-test [seconds]
+# Answers one question: does VRR_ENABLED ever leave 0 for a client that is
+# actually fullscreen?
+#
+# Four config pairs have now shown VRR changing nothing for a WINDOWED app, with
+# VRR_ENABLED pinned at 0. That is consistent with two incompatible readings:
+# either VRR needs a directly-scanned-out surface, so a windowed app can never
+# get it and reporting the max rate is correct; or VRR is simply not working
+# here, in which case every VRR result from this machine is void. Only a
+# fullscreen client separates them.
+SECS="${1:-25}"
+
+GUI_UID=$(loginctl list-sessions --no-legend | awk '$4=="seat0"{print $2; exit}')
+GUI_USER=$(loginctl list-sessions --no-legend | awk '$4=="seat0"{print $3; exit}')
+[ -n "$GUI_UID" ] || { echo "no graphical session"; exit 1; }
+
+CRTC=$(sudo -n drm_info -j 2>/dev/null | jq -r '.["/dev/dri/card1"].crtcs[] | select(.properties.ACTIVE.value==1) | .id' | head -1)
+[ -n "$CRTC" ] || { echo "no active CRTC"; exit 1; }
+echo "active CRTC: $CRTC"
+echo -n "mode reports VRR: "
+sudo -u "$GUI_USER" env XDG_RUNTIME_DIR="/run/user/$GUI_UID" DBUS_SESSION_BUS_ADDRESS="unix:path=/run/user/$GUI_UID/bus" \
+  gdbus call --session --dest org.gnome.Mutter.DisplayConfig --object-path /org/gnome/Mutter/DisplayConfig \
+  --method org.gnome.Mutter.DisplayConfig.GetCurrentState 2>/dev/null \
+  | tr '(' '\n' | grep "is-current.: <true>" | grep -oE "\+vrr" | head -1 || echo "no (+vrr absent -- switch to a variable mode first)"
+
+M2="/home/$GUI_USER/.m2/repository/org/jetbrains/skiko"
+SNAP="$M2/skiko-awt/0.0.0-SNAPSHOT/skiko-awt-0.0.0-SNAPSHOT.jar:$M2/skiko-awt-runtime-linux-x64/0.0.0-SNAPSHOT/skiko-awt-runtime-linux-x64-0.0.0-SNAPSHOT.jar"
+LIB="/home/$GUI_USER/src/frame-pacing-test/build/install/frame-pacing-test/lib"
+JAVA="/home/$GUI_USER/src/JetBrainsRuntime/build/linux-x86_64-server-release/images/jdk/bin/java"
+
+sample() {  # $1 = label
+  local out="/home/$GUI_USER/vrr-$1.txt"
+  sudo -u "$GUI_USER" sh -c ": > '$out'"
+  ( for i in $(seq 1 $((SECS/2))); do
+      sudo -n drm_info -j 2>/dev/null \
+        | jq -r ".[\"/dev/dri/card1\"].crtcs[] | select(.id==$CRTC) | .properties.VRR_ENABLED.value" \
+        | sudo -u "$GUI_USER" tee -a "$out" >/dev/null
+      sleep 2
+    done ) &
+  echo $!
+}
+
+run() {  # $1 = pacing  $2 = label
+  echo
+  echo "--- $2 (fullscreen, skiko.swing.frame.pacing=$1) ---"
+  local S=$(sample "$2")
+  sudo -H -u "$GUI_USER" sh -c "
+    export XDG_RUNTIME_DIR=/run/user/$GUI_UID WAYLAND_DISPLAY=wayland-0 DISPLAY=:0
+    export XAUTHORITY=\$(ls -t /run/user/$GUI_UID/.mutter-Xwaylandauth.* 2>/dev/null | head -1)
+    timeout $SECS '$JAVA' -cp '$SNAP:$LIB/*' \
+      -Dskiko.swing.frame.pacing=$1 -Dwindow=1280x720 -Dfullscreen=true \
+      SkikoDirectMainKt 2>&1 | grep -iE 'fullscreen|display\[|renders/sec' \
+        | awk '/fullscreen|display\[/ {print; next} /renders/ {n++; if (n<=3) print}'
+  "
+  kill $S 2>/dev/null
+  pkill -f SkikoDirectMainKt 2>/dev/null; sleep 2
+  echo "  VRR_ENABLED samples: $(sudo cat /home/$GUI_USER/vrr-$2.txt 2>/dev/null | sort | uniq -c | tr '\n' ' ')"
+}
+
+run false "unpaced"
+run true  "paced"
+
+echo
+echo "If every sample is 0, a fullscreen client does not engage VRR either --"
+echo "which points at the compositor, not at windowed-ness."

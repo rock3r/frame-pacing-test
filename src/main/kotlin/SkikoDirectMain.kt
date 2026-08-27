@@ -78,6 +78,14 @@ fun main() {
             size = Dimension(winSpec[0].trim().toInt(), winSpec[1].trim().toInt())
             placeOnDisplay(this)
             isVisible = true
+            // -Dfullscreen=true asks the compositor for a real fullscreen surface.
+            // Whether VRR engages at all may depend on the surface being scanned
+            // out directly, which a windowed client never is -- so this is the
+            // control that separates "windowed apps cannot get VRR" from "VRR is
+            // not working on this machine".
+            if (System.getProperty("fullscreen") == "true") {
+                goFullScreen(this)
+            }
         }
     }
 }
@@ -109,4 +117,31 @@ private fun placeOnDisplay(frame: JFrame) {
         b.x + (b.width - frame.width) / 2,
         b.y + (b.height - frame.height) / 2,
     )
+}
+
+/**
+ * Requests fullscreen on the window's own screen. setFullScreenWindow is the
+ * request that maps to a fullscreen surface; if the platform refuses it (it is
+ * advisory, and returns silently), fall back to an undecorated window covering
+ * the screen so the run still happens and the log says which path was taken.
+ */
+private fun goFullScreen(frame: JFrame) {
+    val device = frame.graphicsConfiguration?.device
+        ?: GraphicsEnvironment.getLocalGraphicsEnvironment().defaultScreenDevice
+    println("fullscreen: requesting on ${device.iDstring} (supported=${device.isFullScreenSupported})")
+    try {
+        device.fullScreenWindow = frame
+    } catch (t: Throwable) {
+        println("fullscreen: setFullScreenWindow threw $t")
+    }
+    if (device.fullScreenWindow !== frame) {
+        val b = device.defaultConfiguration.bounds
+        println("fullscreen: request not honoured, covering ${b.width}x${b.height} instead")
+        frame.isVisible = false
+        frame.isUndecorated = true
+        frame.bounds = b
+        frame.isVisible = true
+    } else {
+        println("fullscreen: granted")
+    }
 }
