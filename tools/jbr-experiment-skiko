@@ -7,6 +7,10 @@
 # Gradle at run time, which would trip the idle guard.
 SECS="${1:-20}"
 WIN="${2:-1600x1000}"
+# Optional third argument: which screen to launch on. The pacer binds its display
+# once at construction, so a mixed-refresh setup is measured by launching on each
+# display in turn.
+DISPLAY_IDX="${3:-}"
 # The compositor's socket and Mutter's Xwayland cookie both live in the session
 # owner's /run/user/<uid>, which is mode 0700 -- invisible even to another
 # account with passwordless sudo. So the session cannot be found by scanning
@@ -92,14 +96,15 @@ fi
 echo "  idle check: ${IDLE_W} W package (ceiling ${IDLE_MAX} W) -- quiet, proceeding"
 
 echo "=== Skiko frame pacing (skiko.swing.frame.pacing): unpaced vs paced ==="
-echo "  host:    $(hostname)   window: $WIN"
+echo "  host:    $(hostname)   window: $WIN${DISPLAY_IDX:+   screen: $DISPLAY_IDX}"
 echo "  output:  $CONNECTED"
 echo
 
 run_mode() {   # $1 = false|true  $2 = label
   local log=/tmp/fp-skiko-$1.log
   "$JBR/bin/java" -cp "$SNAP:$LIB/*" \
-    -Dskiko.swing.frame.pacing="$1" -Dwindow="$WIN" SkikoDirectMainKt > "$log" 2>&1 &
+    -Dskiko.swing.frame.pacing="$1" -Dwindow="$WIN" \
+    ${DISPLAY_IDX:+-Ddisplay="$DISPLAY_IDX"} SkikoDirectMainKt > "$log" 2>&1 &
   local P=$!
   sleep 10
   if ! kill -0 "$P" 2>/dev/null; then

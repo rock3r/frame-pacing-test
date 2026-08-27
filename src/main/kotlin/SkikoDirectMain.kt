@@ -7,6 +7,7 @@ import org.jetbrains.skiko.ExperimentalSkikoApi
 import org.jetbrains.skiko.SkikoRenderDelegate
 import org.jetbrains.skiko.swing.SkiaSwingLayer
 import java.awt.Dimension
+import java.awt.GraphicsEnvironment
 import java.lang.reflect.Method
 import javax.swing.JFrame
 import javax.swing.SwingUtilities
@@ -75,8 +76,37 @@ fun main() {
             // Same sweep variable as Main.kt: render area, with the display mode held fixed.
             val winSpec = System.getProperty("window", "1600x1000").split("x")
             size = Dimension(winSpec[0].trim().toInt(), winSpec[1].trim().toInt())
-            setLocationRelativeTo(null)
+            placeOnDisplay(this)
             isVisible = true
         }
     }
+}
+
+/**
+ * Puts the window on the screen chosen by -Ddisplay=N, defaulting to the
+ * primary. Needed because the pacer resolves its display once, from the
+ * frame's GraphicsConfiguration, so a mixed-refresh setup can only be measured
+ * by launching on each display in turn -- dragging the window afterwards
+ * changes nothing.
+ */
+private fun placeOnDisplay(frame: JFrame) {
+    val env = GraphicsEnvironment.getLocalGraphicsEnvironment()
+    val screens = env.screenDevices
+    val primary = env.defaultScreenDevice
+    for ((i, device) in screens.withIndex()) {
+        val b = device.defaultConfiguration.bounds
+        val m = device.displayMode
+        println(
+            "display[$i]: ${device.iDstring} ${m.width}x${m.height}@${m.refreshRate}Hz " +
+                "at (${b.x},${b.y})${if (device == primary) " PRIMARY" else ""}"
+        )
+    }
+
+    val index = System.getProperty("display")?.trim()?.toIntOrNull()
+    val target = if (index != null && index in screens.indices) screens[index] else primary
+    val b = target.defaultConfiguration.bounds
+    frame.setLocation(
+        b.x + (b.width - frame.width) / 2,
+        b.y + (b.height - frame.height) / 2,
+    )
 }
