@@ -11,6 +11,17 @@ kotlin {
     jvmToolchain(21)
 }
 
+// Compose pulls org.jetbrains.runtime:jbr-api:1.9.0 transitively. That predates
+// FramePacing entirely, and installDist puts both it and the local SNAPSHOT into lib/ --
+// where a `lib/*` classpath sorts jbr-api-1.9.0.jar ahead of jbr-api-SNAPSHOT.jar,
+// because a digit sorts before a letter. The old jar then shadows the new one,
+// JBR.isFramePacingSupported() throws NoSuchMethodError, and skiko falls back to
+// unpaced without reporting anything: paced and unpaced measure identical, which reads
+// as "pacing does nothing on this platform" rather than as a packaging fault.
+configurations.all {
+    exclude(group = "org.jetbrains.runtime", module = "jbr-api")
+}
+
 dependencies {
     implementation(compose.desktop.currentOs)
     implementation(files("libs/jbr-api-SNAPSHOT.jar"))
