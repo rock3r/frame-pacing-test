@@ -97,9 +97,14 @@ awk -v L="$L" -v gpu="$GPU" -v rapl="$HAVE_RAPL" \
       (gn?usum/gn:0), (gn?gsum/gn:0), (gn?wsum/gn:0)
   else printf " (no GPU backend)"
   if (rapl==1) {
-    printf "  pkg=%5.2f W", (e1-e0)/1e6/dt
-    if (hasc=="1") printf "  core=%5.2f W", (c1-c0)/1e6/dt
-    if (hasu=="1") printf "  GT=%6.3f W",   (u1-u0)/1e6/dt
-    if (hasp=="1") printf "  psys=%5.2f W", (p1-p0)/1e6/dt
+    # RAPL energy_uj is a wrapping counter. A negative delta means it rolled
+    # over mid-sample, and printing it produces figures like -3233 W that are
+    # obviously wrong here but would not be in a smaller wrap. Report the
+    # wrap rather than a number.
+    de=e1-e0; dc=c1-c0; du=u1-u0; dp=p1-p0
+    if (de<0) printf "  pkg=  WRAP "; else printf "  pkg=%5.2f W", de/1e6/dt
+    if (hasc=="1") { if (dc<0) printf "  core= WRAP "; else printf "  core=%5.2f W", dc/1e6/dt }
+    if (hasu=="1") { if (du<0) printf "  GT=  WRAP ";   else printf "  GT=%6.3f W",   du/1e6/dt }
+    if (hasp=="1") { if (dp<0) printf "  psys= WRAP ";  else printf "  psys=%5.2f W", dp/1e6/dt }
   }
   printf "\n" }'

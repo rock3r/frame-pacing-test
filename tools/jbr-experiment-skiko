@@ -28,14 +28,28 @@ fi
 # and jar lookups below would still resolve against the invoking account's home.
 if [ "$(id -u)" != "$GUI_UID" ]; then
   SELF=$(readlink -f "$0")
-  exec sudo -H -u "$GUI_USER" -- "$SELF" "$@"
+  # sudo resets the environment, so anything the run depends on must be passed
+  # through explicitly -- otherwise JBR_TOOLKIT is silently lost and the run
+  # quietly falls back to XWayland while claiming to test Wayland.
+  exec sudo -H -u "$GUI_USER" env JBR_TOOLKIT="${JBR_TOOLKIT:-}" JBR_IDLE_MAX="${JBR_IDLE_MAX:-}" "$SELF" "$@"
 fi
 
 export XDG_RUNTIME_DIR="/run/user/$GUI_UID"
 export WAYLAND_DISPLAY=wayland-0
-export DISPLAY=:0
-# Mutter randomises this cookie name per session, so it has to be globbed.
-export XAUTHORITY=$(ls -t "$XDG_RUNTIME_DIR"/.mutter-Xwaylandauth.* 2>/dev/null | head -1)
+
+# JBR_TOOLKIT=WLToolkit runs against the native Wayland toolkit instead of
+# XWayland. It is not cosmetic: an XWayland surface does not get Mutter's
+# direct-scanout path, so VRR never arms for it, and every frame carries an
+# extra translation layer.
+TOOLKIT_OPT=""
+if [ "${JBR_TOOLKIT:-}" = "WLToolkit" ]; then
+  TOOLKIT_OPT="-Dawt.toolkit.name=WLToolkit"
+  unset DISPLAY XAUTHORITY
+else
+  export DISPLAY=:0
+  # Mutter randomises this cookie name per session, so it has to be globbed.
+  export XAUTHORITY=$(ls -t "$XDG_RUNTIME_DIR"/.mutter-Xwaylandauth.* 2>/dev/null | head -1)
+fi
 
 # Must be the real image, not support/jrtfs_classes/jdk -- require a runnable java.
 JBR=""
@@ -54,11 +68,16 @@ for j in ${SNAP//:/ }; do
   [ -f "$j" ] || { echo "Missing $j -- publish skiko to mavenLocal first"; exit 1; }
 done
 
+# List every connected output rather than keeping the last one the loop saw:
+# with two displays that named whichever connector sorted last, which is not
+# necessarily the one the window is on, and a mislabelled row is worse than no
+# row at all.
 CONNECTED=""
 for s in /sys/class/drm/card*-*/status; do
   [ -e "$s" ] || continue
-  [ "$(cat "$s")" = connected ] && CONNECTED="$(basename "$(dirname "$s")")"
+  [ "$(cat "$s")" = connected ] && CONNECTED="$CONNECTED $(basename "$(dirname "$s")")"
 done
+CONNECTED="${CONNECTED# }"
 [ -n "$CONNECTED" ] || { echo "NO DISPLAY ATTACHED -- pacing measurements need an active CRTC"; exit 1; }
 
 # --- idle guard (see jbr-experiment for the rationale and the warm-up trap) --
@@ -96,14 +115,14 @@ fi
 echo "  idle check: ${IDLE_W} W package (ceiling ${IDLE_MAX} W) -- quiet, proceeding"
 
 echo "=== Skiko frame pacing (skiko.swing.frame.pacing): unpaced vs paced ==="
-echo "  host:    $(hostname)   window: $WIN${DISPLAY_IDX:+   screen: $DISPLAY_IDX}"
-echo "  output:  $CONNECTED"
+echo "  host:    $(hostname)   window: $WIN${DISPLAY_IDX:+   screen: $DISPLAY_IDX}   toolkit: ${JBR_TOOLKIT:-XWayland}"
+echo "  outputs: $CONNECTED  (window on ${DISPLAY_IDX:-primary})"
 echo
 
 run_mode() {   # $1 = false|true  $2 = label
   local log=/tmp/fp-skiko-$1.log
   "$JBR/bin/java" -cp "$SNAP:$LIB/*" \
-    -Dskiko.swing.frame.pacing="$1" -Dwindow="$WIN" \
+    $TOOLKIT_OPT -Dskiko.swing.frame.pacing="$1" -Dwindow="$WIN" \
     ${DISPLAY_IDX:+-Ddisplay="$DISPLAY_IDX"} SkikoDirectMainKt > "$log" 2>&1 &
   local P=$!
   sleep 10

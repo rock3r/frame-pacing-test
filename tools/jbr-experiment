@@ -56,11 +56,16 @@ done
 BIN="$HOME/src/frame-pacing-test/build/install/frame-pacing-test/bin/frame-pacing-test"
 [ -x "$BIN" ] || { echo "Harness not built"; exit 1; }
 
+# List every connected output rather than keeping the last one the loop saw:
+# with two displays that named whichever connector sorted last, which is not
+# necessarily the one the window is on, and a mislabelled row is worse than no
+# row at all.
 CONNECTED=""
 for s in /sys/class/drm/card*-*/status; do
   [ -e "$s" ] || continue
-  [ "$(cat "$s")" = connected ] && CONNECTED="$(basename "$(dirname "$s")")"
+  [ "$(cat "$s")" = connected ] && CONNECTED="$CONNECTED $(basename "$(dirname "$s")")"
 done
+CONNECTED="${CONNECTED# }"
 [ -n "$CONNECTED" ] || { echo "NO DISPLAY ATTACHED -- pacing measurements need an active CRTC"; exit 1; }
 
 # --- idle guard -------------------------------------------------------------
@@ -117,7 +122,7 @@ MODE=$(gdbus call --session --dest org.gnome.Mutter.DisplayConfig \
 [ -n "$MODE" ] || MODE="(mode unknown)"
 echo "=== FramePacing: unpaced vs paced ==="
 echo "  host:    $(hostname)   window: $WIN"
-echo "  output:  $CONNECTED   $MODE"
+echo "  outputs: $CONNECTED   $MODE"
 echo
 
 run_mode() {   # $1 = on|off  $2 = label

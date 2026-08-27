@@ -7,6 +7,7 @@ import org.jetbrains.skiko.ExperimentalSkikoApi
 import org.jetbrains.skiko.SkikoRenderDelegate
 import org.jetbrains.skiko.swing.SkiaSwingLayer
 import java.awt.Dimension
+import java.awt.GraphicsDevice
 import java.awt.GraphicsEnvironment
 import java.lang.reflect.Method
 import javax.swing.JFrame
@@ -84,7 +85,17 @@ fun main() {
             // control that separates "windowed apps cannot get VRR" from "VRR is
             // not working on this machine".
             if (System.getProperty("fullscreen") == "true") {
-                goFullScreen(this)
+                goFullScreen(this, targetDevice())
+            }
+            // Report where the window ACTUALLY is, not where it was asked to go.
+            // The pacer binds to this GraphicsConfiguration, so this is the only
+            // thing that says which display a measurement belongs to -- and a
+            // Wayland client cannot place itself, so the request is frequently
+            // not what happens.
+            javax.swing.SwingUtilities.invokeLater {
+                val dev = graphicsConfiguration?.device
+                println("window-on: ${dev?.iDstring} ${dev?.displayMode?.refreshRate}Hz " +
+                    "bounds=${graphicsConfiguration?.bounds}")
             }
         }
     }
@@ -125,9 +136,20 @@ private fun placeOnDisplay(frame: JFrame) {
  * advisory, and returns silently), fall back to an undecorated window covering
  * the screen so the run still happens and the log says which path was taken.
  */
-private fun goFullScreen(frame: JFrame) {
-    val device = frame.graphicsConfiguration?.device
-        ?: GraphicsEnvironment.getLocalGraphicsEnvironment().defaultScreenDevice
+/**
+ * The screen named by -Ddisplay=N, or the primary. Separate from placement
+ * because a Wayland client cannot position its own window -- setLocation is a
+ * no-op there, so -Ddisplay only takes effect through a fullscreen request,
+ * which names the output the compositor should use.
+ */
+private fun targetDevice(): GraphicsDevice {
+    val env = GraphicsEnvironment.getLocalGraphicsEnvironment()
+    val screens = env.screenDevices
+    val index = System.getProperty("display")?.trim()?.toIntOrNull()
+    return if (index != null && index in screens.indices) screens[index] else env.defaultScreenDevice
+}
+
+private fun goFullScreen(frame: JFrame, device: GraphicsDevice) {
     println("fullscreen: requesting on ${device.iDstring} (supported=${device.isFullScreenSupported})")
     try {
         device.fullScreenWindow = frame
