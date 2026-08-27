@@ -5,7 +5,7 @@ Scripts used to produce the per-platform numbers in the PRD
 
 | Script | Platform | What it does |
 |---|---|---|
-| `jbr-measure` | Linux | Samples GPU + CPU power/clock over an interval. NVIDIA via `nvidia-smi`, Intel via RAPL sysfs + i915 rc6. Same output shape either way. |
+| `jbr-measure` | Linux | Samples GPU + CPU power/clock over an interval. NVIDIA via `nvidia-smi`, AMD via amdgpu sysfs + hwmon, Intel via RAPL sysfs + i915 rc6. Same output shape whichever it picks. |
 | `jbr-experiment` | Linux | Runs the harness unpaced then paced at a given window size and reports both. |
 | `fpt-measure.ps1` | Windows | Same, via a scheduled task, sampling `nvidia-smi` for real GPU watts. |
 
@@ -66,3 +66,19 @@ second display on the iGPU, and cross-GPU compositing cut frame rate by 2.6×.
 **Windows GUI apps cannot run from an ssh session** (session 0, no desktop). They must be
 launched via `schtasks` with `/it`. Scheduled tasks do not inherit environment set over
 ssh, which is why `fpt-measure.ps1` rewrites the launcher `.bat` on each run.
+
+**A sleeping display makes every number junk.** A panel in power save is still reported as
+connected and still has a mode, but it has stopped scanning out, so there is no vblank to
+pace against. On Windows this made `IDXGIOutput::WaitForVBlank` return *successfully*
+without waiting, spinning a tick loop at 1.65 MHz; the same idle panel skews any Linux
+sampling the same way, silently. Wake the display before measuring, and re-check that it
+is awake if a run looks impossible.
+
+**RAPL domains are found by name, not by index.** `intel-rapl:0` is not a stable address:
+numbering differs between parts, and Zen exposes the same powercap tree through
+`intel_rapl_msr` under its own indices despite the Intel-sounding name. `jbr-measure`
+scans `/sys/class/powercap/*/name` for `package-0`, `core`, `uncore` and `psys`, and
+prints only the domains that actually exist — AMD parts commonly have no `uncore`, which
+is the per-iGPU domain the Intel measurements leaned on. On amdgpu that loss does not
+matter, because `hwmon/power1_average` gives real GPU watts directly, which the UHD 630
+never did.

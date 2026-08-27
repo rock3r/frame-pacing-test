@@ -1,27 +1,55 @@
 #!/bin/bash
 # jbr-measure <label> <seconds>
 # Samples GPU + CPU power/clock over an interval. Works on Intel iGPU (RAPL + i915
-# sysfs) and on NVIDIA discrete (nvidia-smi), so output stays comparable across boxes.
+# sysfs), AMD iGPU/dGPU (RAPL + amdgpu sysfs) and NVIDIA discrete (nvidia-smi), so
+# output stays comparable across boxes.
 L="${1:-sample}"; SECS="${2:-15}"
 R=/sys/class/powercap
 rd() { sudo -n cat "$1" 2>/dev/null || echo 0; }
 
 # --- pick GPU backend -------------------------------------------------------
+# amdgpu is checked before i915 by looking for its own busy counter; a box can
+# carry both an AMD iGPU and a discrete card, and nvidia-smi wins when present
+# because that is where the work actually lands.
 GPU=none
 if command -v nvidia-smi >/dev/null 2>&1 && nvidia-smi -L 2>/dev/null | grep -q '^GPU'; then
   GPU=nvidia
 else
   for c in /sys/class/drm/card*/; do
+    if [ -e "$c/device/gpu_busy_percent" ]; then
+      GPU=amdgpu; CARD="${c%/}"
+      # amdgpu reports real watts through hwmon, which i915 never did.
+      for h in "$c"device/hwmon/hwmon*/; do
+        [ -e "$h/power1_average" ] && { HWMON="${h%/}"; break; }
+      done
+      break
+    fi
     [ -e "$c/gt_cur_freq_mhz" ] && { GPU=i915; CARD="${c%/}"; break; }
   done
 fi
 
-# --- RAPL present? (Intel; absent on many AMD parts) ------------------------
-HAVE_RAPL=0; [ -e $R/intel-rapl:0/energy_uj ] && HAVE_RAPL=1
+# --- RAPL domains, discovered by name ---------------------------------------
+# Do not hardcode intel-rapl:N — the numbering differs between parts, and Zen
+# exposes the same powercap tree through intel_rapl_msr under its own indices.
+find_rapl() {
+  local want="$1" f
+  for f in $R/*/name $R/*/*/name; do
+    [ -e "$f" ] || continue
+    [ "$(cat "$f" 2>/dev/null)" = "$want" ] && { dirname "$f"; return 0; }
+  done
+  return 1
+}
+D_PKG=$(find_rapl package-0) || true
+D_CORE=$(find_rapl core)     || true
+D_UNCORE=$(find_rapl uncore) || true
+D_PSYS=$(find_rapl psys)     || true
+HAVE_RAPL=0; [ -n "$D_PKG" ] && HAVE_RAPL=1
 
 t0=$(date +%s%N)
-[ $HAVE_RAPL = 1 ] && { e0=$(rd $R/intel-rapl:0/energy_uj); c0=$(rd $R/intel-rapl:0:0/energy_uj)
-                        u0=$(rd $R/intel-rapl:0:1/energy_uj); p0=$(rd $R/intel-rapl:1/energy_uj); }
+[ -n "$D_PKG" ]    && e0=$(rd $D_PKG/energy_uj)
+[ -n "$D_CORE" ]   && c0=$(rd $D_CORE/energy_uj)
+[ -n "$D_UNCORE" ] && u0=$(rd $D_UNCORE/energy_uj)
+[ -n "$D_PSYS" ]   && p0=$(rd $D_PSYS/energy_uj)
 [ "$GPU" = i915 ] && r0=$(cat $CARD/power/rc6_residency_ms 2>/dev/null || echo 0)
 
 gsum=0; gn=0; wsum=0; usum=0
@@ -33,26 +61,41 @@ while [ "$(date +%s)" -lt "$end" ]; do
             wsum=$(awk -v a="$wsum" -v b="${w:-0}" 'BEGIN{print a+b}')
             gsum=$(awk -v a="$gsum" -v b="${cl:-0}" 'BEGIN{print a+b}')
             usum=$(awk -v a="$usum" -v b="${ut:-0}" 'BEGIN{print a+b}') ;;
+    amdgpu) ut=$(cat $CARD/device/gpu_busy_percent 2>/dev/null || echo 0)
+            cl=0; [ -n "$HWMON" ] && cl=$(awk -v h="$(cat $HWMON/freq1_input 2>/dev/null || echo 0)" \
+                                              'BEGIN{printf "%d", h/1000000}')
+            w=0;  [ -n "$HWMON" ] && w=$(awk -v p="$(cat $HWMON/power1_average 2>/dev/null || echo 0)" \
+                                              'BEGIN{printf "%.3f", p/1000000}')
+            usum=$(awk -v a="$usum" -v b="${ut:-0}" 'BEGIN{print a+b}')
+            gsum=$(awk -v a="$gsum" -v b="${cl:-0}" 'BEGIN{print a+b}')
+            wsum=$(awk -v a="$wsum" -v b="${w:-0}" 'BEGIN{print a+b}') ;;
     i915)   gsum=$(( gsum + $(cat $CARD/gt_cur_freq_mhz 2>/dev/null || echo 0) )) ;;
   esac
   gn=$((gn+1)); sleep 0.5
 done
 t1=$(date +%s%N)
-[ $HAVE_RAPL = 1 ] && { e1=$(rd $R/intel-rapl:0/energy_uj); c1=$(rd $R/intel-rapl:0:0/energy_uj)
-                        u1=$(rd $R/intel-rapl:0:1/energy_uj); p1=$(rd $R/intel-rapl:1/energy_uj); }
+[ -n "$D_PKG" ]    && e1=$(rd $D_PKG/energy_uj)
+[ -n "$D_CORE" ]   && c1=$(rd $D_CORE/energy_uj)
+[ -n "$D_UNCORE" ] && u1=$(rd $D_UNCORE/energy_uj)
+[ -n "$D_PSYS" ]   && p1=$(rd $D_PSYS/energy_uj)
 [ "$GPU" = i915 ] && r1=$(cat $CARD/power/rc6_residency_ms 2>/dev/null || echo 0)
 
 awk -v L="$L" -v gpu="$GPU" -v rapl="$HAVE_RAPL" \
     -v t0="$t0" -v t1="$t1" -v gn="$gn" -v gsum="$gsum" -v wsum="$wsum" -v usum="$usum" \
     -v r0="${r0:-0}" -v r1="${r1:-0}" \
     -v e0="${e0:-0}" -v e1="${e1:-0}" -v c0="${c0:-0}" -v c1="${c1:-0}" \
-    -v u0="${u0:-0}" -v u1="${u1:-0}" -v p0="${p0:-0}" -v p1="${p1:-0}" 'BEGIN{
+    -v u0="${u0:-0}" -v u1="${u1:-0}" -v p0="${p0:-0}" -v p1="${p1:-0}" \
+    -v hasc="${D_CORE:+1}" -v hasu="${D_UNCORE:+1}" -v hasp="${D_PSYS:+1}" 'BEGIN{
   dt=(t1-t0)/1e9
   printf "%-26s", L
   if (gpu=="i915") printf " rc6=%5.1f%%  clk=%4.0f MHz", (r1-r0)/10/dt, (gn?gsum/gn:0)
-  else if (gpu=="nvidia") printf " GPU=%5.1f%% clk=%4.0f MHz  GPUw=%6.2f W", \
+  else if (gpu=="nvidia" || gpu=="amdgpu") printf " GPU=%5.1f%% clk=%4.0f MHz  GPUw=%6.2f W", \
       (gn?usum/gn:0), (gn?gsum/gn:0), (gn?wsum/gn:0)
   else printf " (no GPU backend)"
-  if (rapl==1) printf "  pkg=%5.2f W  core=%5.2f W  GT=%6.3f W  psys=%5.2f W", \
-      (e1-e0)/1e6/dt, (c1-c0)/1e6/dt, (u1-u0)/1e6/dt, (p1-p0)/1e6/dt
+  if (rapl==1) {
+    printf "  pkg=%5.2f W", (e1-e0)/1e6/dt
+    if (hasc=="1") printf "  core=%5.2f W", (c1-c0)/1e6/dt
+    if (hasu=="1") printf "  GT=%6.3f W",   (u1-u0)/1e6/dt
+    if (hasp=="1") printf "  psys=%5.2f W", (p1-p0)/1e6/dt
+  }
   printf "\n" }'
