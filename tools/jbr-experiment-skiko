@@ -7,10 +7,31 @@
 # Gradle at run time, which would trip the idle guard.
 SECS="${1:-20}"
 WIN="${2:-1600x1000}"
-export XDG_RUNTIME_DIR=/run/user/1000
+# The compositor's socket and Mutter's Xwayland cookie both live in the session
+# owner's /run/user/<uid>, which is mode 0700 -- invisible even to another
+# account with passwordless sudo. So the session cannot be found by scanning
+# that directory; ask logind, whose session list any user may read.
+GUI_UID=$(loginctl list-sessions --no-legend 2>/dev/null | awk '$4=="seat0"{print $2; exit}')
+GUI_USER=$(loginctl list-sessions --no-legend 2>/dev/null | awk '$4=="seat0"{print $3; exit}')
+if [ -z "$GUI_UID" ]; then
+  echo "No graphical session on seat0. Log in at the console first --"
+  echo "  pacing measurements need a live compositor, not just a running machine."
+  exit 1
+fi
+
+# Run as the session owner. The harness is a GUI client and has to be the account
+# whose compositor it renders into. -H so $HOME follows too, otherwise the build
+# and jar lookups below would still resolve against the invoking account's home.
+if [ "$(id -u)" != "$GUI_UID" ]; then
+  SELF=$(readlink -f "$0")
+  exec sudo -H -u "$GUI_USER" -- "$SELF" "$@"
+fi
+
+export XDG_RUNTIME_DIR="/run/user/$GUI_UID"
 export WAYLAND_DISPLAY=wayland-0
 export DISPLAY=:0
-export XAUTHORITY=$(ls -t /run/user/1000/.mutter-Xwaylandauth.* 2>/dev/null | head -1)
+# Mutter randomises this cookie name per session, so it has to be globbed.
+export XAUTHORITY=$(ls -t "$XDG_RUNTIME_DIR"/.mutter-Xwaylandauth.* 2>/dev/null | head -1)
 
 # Must be the real image, not support/jrtfs_classes/jdk -- require a runnable java.
 JBR=""
@@ -37,15 +58,28 @@ done
 [ -n "$CONNECTED" ] || { echo "NO DISPLAY ATTACHED -- pacing measurements need an active CRTC"; exit 1; }
 
 # --- idle guard (see jbr-experiment for the rationale and the warm-up trap) --
+# The ceiling cannot be a constant: it came from a 35 W i5 and a 16-thread Ryzen
+# does not idle near it. Taken from JBR_IDLE_MAX, or the baseline written by
+# `jbr-experiment --calibrate`, else the old Intel-shaped default.
+BASELINE_FILE=/etc/jbr-idle-baseline
+if [ -n "${JBR_IDLE_MAX:-}" ]; then
+  IDLE_MAX="$JBR_IDLE_MAX"
+elif [ -r "$BASELINE_FILE" ]; then
+  IDLE_MAX=$(awk '{printf "%.2f", $1 * 1.6 + 0.5}' "$BASELINE_FILE")
+else
+  IDLE_MAX=2.0
+fi
+
 jbr-measure "warmup" 3 >/dev/null 2>&1
 PRE=$(jbr-measure "preflight" 5)
 IDLE_W=$(echo "$PRE" | grep -oE 'pkg=[[:space:]]*[0-9.]+' | grep -oE '[0-9.]+$')
-if awk -v w="${IDLE_W:-99}" 'BEGIN{exit !(w+0 > 2.0)}'; then
-  echo "ABORT: machine is not idle -- package power ${IDLE_W} W (expect <1 W when quiet)."
+if awk -v w="${IDLE_W:-99}" -v m="$IDLE_MAX" 'BEGIN{exit !(w+0 > m+0)}'; then
+  echo "ABORT: machine is not idle -- package power ${IDLE_W} W (ceiling ${IDLE_MAX} W)."
+  echo "  if this machine is genuinely quiet, run: jbr-experiment --calibrate"
   ps -eo pcpu,pid,args --sort=-pcpu | head -6 | cut -c1-110 | sed 's/^/    /'
   exit 1
 fi
-echo "  idle check: ${IDLE_W} W package -- quiet, proceeding"
+echo "  idle check: ${IDLE_W} W package (ceiling ${IDLE_MAX} W) -- quiet, proceeding"
 
 echo "=== Skiko frame pacing (skiko.swing.frame.pacing): unpaced vs paced ==="
 echo "  host:    $(hostname)   window: $WIN"

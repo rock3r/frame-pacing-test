@@ -33,13 +33,12 @@ if [ -z "$GUI_UID" ]; then
   exit 1
 fi
 
-# Run as the session owner. Driving someone else's compositor is not a
-# permissions problem to work around: the harness is a GUI client and has to be
-# the user whose session it renders into. Re-exec rather than fail, so the same
-# command works whether invoked locally or over ssh as a maintenance account.
+# Run as the session owner. The harness is a GUI client and has to be the account
+# whose compositor it renders into. -H so $HOME follows too, otherwise the build
+# lookups below would still resolve against the invoking account's home.
 if [ "$(id -u)" != "$GUI_UID" ]; then
   SELF=$(readlink -f "$0")
-  exec sudo -u "$GUI_USER" -- "$SELF" "$@"
+  exec sudo -H -u "$GUI_USER" -- "$SELF" "$@"
 fi
 
 export XDG_RUNTIME_DIR="/run/user/$GUI_UID"
