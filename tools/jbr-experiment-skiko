@@ -73,6 +73,16 @@ fi
 jbr-measure "warmup" 3 >/dev/null 2>&1
 PRE=$(jbr-measure "preflight" 5)
 IDLE_W=$(echo "$PRE" | grep -oE 'pkg=[[:space:]]*[0-9.]+' | grep -oE '[0-9.]+$')
+# 0.00 W is not a quiet machine, it is a failed read: rd() falls back to 0 when
+# the RAPL counters cannot be opened. Treating that as "idle" would wave through
+# a run whose power columns are all zero, so refuse it explicitly.
+if [ -z "${IDLE_W:-}" ] || awk -v w="${IDLE_W:-0}" 'BEGIN{exit !(w+0 <= 0)}'; then
+  echo "ABORT: package power read back as ${IDLE_W:-empty} W -- the RAPL counters"
+  echo "  are not readable by $(whoami). They are root-only by design; grant this"
+  echo "  account /usr/local/bin/jbr-rapl in sudoers, or run jbr-measure to see"
+  echo "  which columns come back zero."
+  exit 1
+fi
 if awk -v w="${IDLE_W:-99}" -v m="$IDLE_MAX" 'BEGIN{exit !(w+0 > m+0)}'; then
   echo "ABORT: machine is not idle -- package power ${IDLE_W} W (ceiling ${IDLE_MAX} W)."
   echo "  if this machine is genuinely quiet, run: jbr-experiment --calibrate"
@@ -110,8 +120,8 @@ echo
 # --- post-run idle check (mid-run load makes figures junk; say so loudly) ----
 POST=$(jbr-measure "postflight" 5)
 POST_W=$(echo "$POST" | grep -oE 'pkg=[[:space:]]*[0-9.]+' | grep -oE '[0-9.]+$')
-if awk -v w="${POST_W:-99}" 'BEGIN{exit !(w+0 > 2.0)}'; then
-  echo "  *** SUSPECT RUN: package power was ${POST_W} W after the run (expect <1 W)."
+if awk -v w="${POST_W:-99}" -v m="$IDLE_MAX" 'BEGIN{exit !(w+0 > m+0)}'; then
+  echo "  *** SUSPECT RUN: package power was ${POST_W} W after the run (ceiling ${IDLE_MAX} W)."
   echo "  *** Something loaded the machine mid-run; power figures above are unreliable."
   ps -eo pcpu,pid,args --sort=-pcpu | head -5 | cut -c1-110 | sed 's/^/      /'
 else
