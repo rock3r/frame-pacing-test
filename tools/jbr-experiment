@@ -3,6 +3,22 @@
 # Runs the FramePacing harness unpaced vs paced at a given window size.
 # Window size is the sweep variable (display mode held constant), matching the
 # Windows methodology so the two platforms are directly comparable.
+if [ "${1:-}" = "--calibrate" ]; then
+  # Records what THIS machine draws when quiet, so the guard has a real
+  # reference instead of a number borrowed from different silicon.
+  echo "Measuring idle package power. Leave the machine alone for ~30s."
+  jbr-measure "warmup" 3 >/dev/null 2>&1
+  best=""
+  for i in 1 2 3; do
+    w=$(jbr-measure "calib$i" 8 | grep -oE 'pkg=[[:space:]]*[0-9.]+' | grep -oE '[0-9.]+$')
+    echo "  sample $i: ${w:-?} W"
+    best=$(awk -v a="${best:-999}" -v b="${w:-999}" 'BEGIN{print (b+0<a+0)?b:a}')
+  done
+  echo "$best" | sudo tee /etc/jbr-idle-baseline >/dev/null
+  echo "baseline = $best W  ->  guard will trip above $(awk -v b="$best" 'BEGIN{printf "%.2f", b*1.6+0.5}') W"
+  exit 0
+fi
+
 SECS="${1:-20}"
 WIN="${2:-1600x1000}"
 export XDG_RUNTIME_DIR=/run/user/1000
@@ -28,25 +44,46 @@ done
 
 # --- idle guard -------------------------------------------------------------
 # Background load corrupts the power figures (CPU contention shows up in pkg/core
-# while GT stays sane, which is confusing to spot after the fact). A quiet
-# jbr-bench idles around 0.5 W package; anything above 2 W means something else
-# is running and the numbers would be junk.
+# while GT stays sane, which is confusing to spot after the fact).
+#
+# The threshold cannot be a constant. A quiet i5-9500T idles near 0.5 W package;
+# a 16-thread Ryzen does not, and a fixed 2 W ceiling would refuse to run on a
+# perfectly idle machine. So the ceiling is calibrated per host:
+#   JBR_IDLE_MAX=<watts>       explicit override, wins over everything
+#   /etc/jbr-idle-baseline     written by `jbr-experiment --calibrate`
+#   otherwise                  2.0 W, which suits the small Intel parts only
+BASELINE_FILE=/etc/jbr-idle-baseline
+if [ -n "${JBR_IDLE_MAX:-}" ]; then
+  IDLE_MAX="$JBR_IDLE_MAX"
+elif [ -r "$BASELINE_FILE" ]; then
+  IDLE_MAX=$(awk '{printf "%.2f", $1 * 1.6 + 0.5}' "$BASELINE_FILE")
+else
+  IDLE_MAX=2.0
+fi
 # The FIRST measurement in a fresh ssh session reads ~4 W regardless of load:
 # it captures session startup (ssh login, bash init, first sudo doing PAM +
 # sudoers parse). Discard one sample so the guard measures the machine, not us.
 jbr-measure "warmup" 3 >/dev/null 2>&1
 PRE=$(jbr-measure "preflight" 5)
 IDLE_W=$(echo "$PRE" | grep -oE 'pkg=[[:space:]]*[0-9.]+' | grep -oE '[0-9.]+$')
-if awk -v w="${IDLE_W:-99}" 'BEGIN{exit !(w+0 > 2.0)}'; then
-  echo "ABORT: machine is not idle -- package power ${IDLE_W} W (expect <1 W when quiet)."
+if awk -v w="${IDLE_W:-99}" -v m="$IDLE_MAX" 'BEGIN{exit !(w+0 > m+0)}'; then
+  echo "ABORT: machine is not idle -- package power ${IDLE_W} W (ceiling ${IDLE_MAX} W)."
+  echo "  if this machine is genuinely quiet, run: jbr-experiment --calibrate"
   echo "  measurements would be corrupted by CPU contention. Top consumers:"
   ps -eo pcpu,pid,args --sort=-pcpu | head -6 | cut -c1-110 | sed 's/^/    /'
   exit 1
 fi
-echo "  idle check: ${IDLE_W} W package -- quiet, proceeding"
+echo "  idle check: ${IDLE_W} W package (ceiling ${IDLE_MAX} W) -- quiet, proceeding"
 
-MODE=$(sudo -n cat /sys/kernel/debug/dri/1/i915_display_info 2>/dev/null \
-       | grep -A2 'CRTC:58' | grep -oE 'mode="[0-9x]+": [0-9]+' | head -1)
+# i915_display_info is Intel-only. Ask Mutter first (it knows the active mode
+# including refresh), then fall back to the connector's preferred mode, which is
+# the first line of its modes file.
+MODE=$(gdbus call --session --dest org.gnome.Mutter.DisplayConfig \
+         --object-path /org/gnome/Mutter/DisplayConfig \
+         --method org.gnome.Mutter.DisplayConfig.GetCurrentState 2>/dev/null \
+       | grep -oE "'[0-9]+x[0-9]+@[0-9.]+'" | head -1 | tr -d "'")
+[ -n "$MODE" ] || MODE=$(head -1 "/sys/class/drm/$CONNECTED/modes" 2>/dev/null)
+[ -n "$MODE" ] || MODE="(mode unknown)"
 echo "=== FramePacing: unpaced vs paced ==="
 echo "  host:    $(hostname)   window: $WIN"
 echo "  output:  $CONNECTED   $MODE"
@@ -77,8 +114,8 @@ echo
 # sane. Re-check afterwards and say so loudly if the run is suspect.
 POST=$(jbr-measure "postflight" 5)
 POST_W=$(echo "$POST" | grep -oE 'pkg=[[:space:]]*[0-9.]+' | grep -oE '[0-9.]+$')
-if awk -v w="${POST_W:-99}" 'BEGIN{exit !(w+0 > 2.0)}'; then
-  echo "  *** SUSPECT RUN: package power was ${POST_W} W after the run (expect <1 W)."
+if awk -v w="${POST_W:-99}" -v m="$IDLE_MAX" 'BEGIN{exit !(w+0 > m+0)}'; then
+  echo "  *** SUSPECT RUN: package power was ${POST_W} W after the run (ceiling ${IDLE_MAX} W)."
   echo "  *** Something loaded the machine mid-run; power figures above are unreliable."
   ps -eo pcpu,pid,args --sort=-pcpu | head -5 | cut -c1-110 | sed 's/^/      /'
 else

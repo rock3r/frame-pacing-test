@@ -5,7 +5,11 @@
 # output stays comparable across boxes.
 L="${1:-sample}"; SECS="${2:-15}"
 R=/sys/class/powercap
-rd() { sudo -n cat "$1" 2>/dev/null || echo 0; }
+# RAPL energy counters are root-only by design (CVE-2020-8694 made them a power
+# side channel). Try in order: plain read, blanket NOPASSWD sudo, then the narrow
+# jbr-rapl reader -- so the script works whether or not a host grants broad sudo.
+rd() { cat "$1" 2>/dev/null || sudo -n cat "$1" 2>/dev/null \
+       || sudo -n /usr/local/bin/jbr-rapl "$1" 2>/dev/null || echo 0; }
 
 # --- pick GPU backend -------------------------------------------------------
 # amdgpu is checked before i915 by looking for its own busy counter; a box can

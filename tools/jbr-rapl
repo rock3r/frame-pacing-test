@@ -1,0 +1,12 @@
+#!/bin/bash
+# Reads one RAPL energy counter. Exists so that sudo can be granted for exactly
+# this and nothing else: /sys/class/powercap/*/energy_uj is root-only on purpose
+# (CVE-2020-8694, a power side channel), and neither relaxing the mode globally
+# nor granting NOPASSWD on `cat` is a reasonable trade for a measurement rig.
+P="$1"
+case "$P" in
+  /sys/class/powercap/*/energy_uj|/sys/class/powercap/*/*/energy_uj) ;;
+  *) echo "refused: $P" >&2; exit 1 ;;
+esac
+[ -e "$P" ] || { echo 0; exit 0; }
+cat "$P"
