@@ -1,0 +1,34 @@
+#!/bin/bash
+# mac-measure <label> <seconds>
+# macOS counterpart to jbr-measure: same output shape so rows from the three
+# platforms merge without reconciliation.
+#
+# powermetrics needs root; /etc/sudoers.d/powermetrics grants it passwordless,
+# mirroring the narrow jbr-rapl grant on Linux. GPU residency alone is
+# misleading on Apple silicon -- a paced run can sit at 90% residency while
+# holding the minimum clock -- so power is the column to compare, not residency.
+L="${1:-sample}"; SECS="${2:-15}"
+
+command -v powermetrics >/dev/null || { echo "$L: powermetrics not found"; exit 1; }
+# Probe with the real command, not `sudo -n true`: the sudoers grant is narrow
+# (powermetrics only, which is the right shape), so a generic probe fails even
+# when powermetrics itself is permitted.
+if ! sudo -n powermetrics --help >/dev/null 2>&1; then
+  echo "$L: powermetrics needs passwordless sudo (see /etc/sudoers.d/powermetrics)"
+  exit 1
+fi
+
+RAW=$(sudo -n powermetrics --samplers gpu_power,cpu_power -n "$SECS" -i 1000 2>/dev/null)
+[ -n "$RAW" ] || { echo "$L: powermetrics produced nothing"; exit 1; }
+
+echo "$RAW" | awk -v L="$L" '
+  /^GPU Power:/                        { gw += $3; gwn++ }
+  /^CPU Power:/                        { cw += $3; cwn++ }
+  /^Combined Power/                    { pw += $(NF-1); pwn++ }
+  /^GPU HW active frequency:/          { gf += $5; gfn++ }
+  /^GPU HW active residency:/          { r = $5; sub(/%/, "", r); gr += r; grn++ }
+  END {
+    if (gwn == 0) { printf "%-26s (powermetrics parsed nothing -- format changed?)\n", L; exit 1 }
+    printf "%-26s GPU=%5.1f%% clk=%4.0f MHz  GPUw=%6.2f W  pkg=%5.2f W  cpu=%5.2f W\n",
+      L, (grn?gr/grn:0), (gfn?gf/gfn:0), (gwn?gw/gwn/1000:0), (pwn?pw/pwn/1000:0), (cwn?cw/cwn/1000:0)
+  }'
