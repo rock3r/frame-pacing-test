@@ -21,10 +21,24 @@ fi
 
 SECS="${1:-20}"
 WIN="${2:-1600x1000}"
-export XDG_RUNTIME_DIR=/run/user/1000
+# Find the runtime dir of whoever actually owns the graphical session, rather
+# than assuming UID 1000. The account running the desktop is not necessarily the
+# account running this script -- on a box where an interactive user owns the
+# session and a separate maintenance account is used over ssh, they differ.
+GUI_RUNTIME=""
+for d in /run/user/*/; do
+  [ -S "$d/wayland-0" ] && { GUI_RUNTIME="${d%/}"; break; }
+done
+[ -n "$GUI_RUNTIME" ] || for d in /run/user/*/; do
+  ls "$d"/.mutter-Xwaylandauth.* >/dev/null 2>&1 && { GUI_RUNTIME="${d%/}"; break; }
+done
+[ -n "$GUI_RUNTIME" ] || { echo "No graphical session found under /run/user/*."; echo "  Log in at the console first -- pacing needs a live compositor."; exit 1; }
+
+export XDG_RUNTIME_DIR="$GUI_RUNTIME"
 export WAYLAND_DISPLAY=wayland-0
 export DISPLAY=:0
-export XAUTHORITY=$(ls -t /run/user/1000/.mutter-Xwaylandauth.* 2>/dev/null | head -1)
+# Mutter randomises this cookie name per session, so it has to be globbed.
+export XAUTHORITY=$(ls -t "$GUI_RUNTIME"/.mutter-Xwaylandauth.* 2>/dev/null | head -1)
 
 # Must be the real image, not support/jrtfs_classes/jdk -- require a runnable java.
 JBR=""
