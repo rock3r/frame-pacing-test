@@ -1,0 +1,53 @@
+#!/bin/bash
+# apply-displays <preset>
+# Applies a display configuration immediately via Mutter's DBus API. No reboot:
+# editing monitors.xml only needs one because GDM autologin fires once per boot.
+#
+# method=1 is TEMPORARY and applies instantly with NO dialog and NO revert timer.
+# method=2 is PERSISTENT and raises the 15 s "Keep these display settings?" prompt
+# -- which is the opposite of what the names suggest, and there is no
+# ConfirmConfiguration method on this Mutter (50.1) to dismiss it with, so a
+# PERSISTENT apply cannot be automated at all. TEMPORARY is not written to
+# monitors.xml and so reverts on session restart, hotplug and display sleep/wake;
+# for a measurement rig that is the wanted behaviour, but re-apply after any of
+# those and confirm the mode before trusting a run.
+#
+# Presets disable a monitor by simply omitting it, so single-display configs are
+# reachable without unplugging anything.
+P="${1:?usage: apply-displays <A-vrr|A-fix|B-4k-vrr|B-4k-fix|B-fhd-vrr|B-fhd-fix|C-vrr|C-fix>}"
+
+ARZOPA=DP-2
+AOC=HDMI-1
+A_RATE="2560x1440@179.999"
+K_RATE="3840x2160@120.000"
+F_RATE="1920x1080@120.000"
+
+case "$P" in
+  A-vrr)     MONS="[(0, 0, 1.0, uint32 0, true, [('$ARZOPA', '$A_RATE+vrr', @a{sv} {})])]" ;;
+  A-fix)     MONS="[(0, 0, 1.0, uint32 0, true, [('$ARZOPA', '$A_RATE', @a{sv} {})])]" ;;
+  B-4k-vrr)  MONS="[(0, 0, 1.0, uint32 0, true, [('$AOC', '$K_RATE+vrr', @a{sv} {})])]" ;;
+  B-4k-fix)  MONS="[(0, 0, 1.0, uint32 0, true, [('$AOC', '$K_RATE', @a{sv} {})])]" ;;
+  B-fhd-vrr) MONS="[(0, 0, 1.0, uint32 0, true, [('$AOC', '$F_RATE+vrr', @a{sv} {})])]" ;;
+  B-fhd-fix) MONS="[(0, 0, 1.0, uint32 0, true, [('$AOC', '$F_RATE', @a{sv} {})])]" ;;
+  C-vrr)     MONS="[(0, 0, 1.0, uint32 0, true, [('$ARZOPA', '$A_RATE+vrr', @a{sv} {})]), (2560, 0, 1.0, uint32 0, false, [('$AOC', '$K_RATE+vrr', @a{sv} {})])]" ;;
+  C-fix)     MONS="[(0, 0, 1.0, uint32 0, true, [('$ARZOPA', '$A_RATE', @a{sv} {})]), (2560, 0, 1.0, uint32 0, false, [('$AOC', '$K_RATE', @a{sv} {})])]" ;;
+  *) echo "unknown preset: $P"; exit 1 ;;
+esac
+
+B="env XDG_RUNTIME_DIR=/run/user/$(id -u toni) DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/$(id -u toni)/bus"
+call() { sudo -u toni $B gdbus call --session --dest org.gnome.Mutter.DisplayConfig \
+           --object-path /org/gnome/Mutter/DisplayConfig \
+           --method "org.gnome.Mutter.DisplayConfig.$@"; }
+
+# The serial must be the current one or the call is rejected. Match it at the
+# start of the reply: a bare [0-9]+ also matches the "32" in "uint32".
+SERIAL=$(call GetCurrentState 2>/dev/null | sed -n 's/^(uint32 \([0-9]*\).*/\1/p')
+[ -n "$SERIAL" ] || { echo "could not read config serial"; exit 1; }
+
+call ApplyMonitorsConfig "$SERIAL" 1 "$MONS" "@a{sv} {}" >/dev/null || { echo "apply failed"; exit 1; }
+sleep 3
+
+# The call succeeding is not evidence it took -- confirm which mode is current.
+echo "preset $P applied. current:"
+call GetCurrentState 2>/dev/null | tr '(' '\n' | grep "is-current.: <true>" \
+  | grep -oE "^.[0-9]+x[0-9]+@[0-9.]+(\+vrr)?." | sed "s/^/  /"
